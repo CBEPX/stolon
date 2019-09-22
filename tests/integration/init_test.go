@@ -15,6 +15,7 @@
 package integration
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -22,9 +23,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sorintlab/stolon/common"
-	"github.com/sorintlab/stolon/pkg/cluster"
-	"github.com/sorintlab/stolon/pkg/store"
+	"github.com/sorintlab/stolon/internal/cluster"
+	"github.com/sorintlab/stolon/internal/common"
+	"github.com/sorintlab/stolon/internal/store"
 
 	"github.com/satori/go.uuid"
 )
@@ -104,9 +105,9 @@ func testInitNew(t *testing.T, merge bool) {
 	defer tstore.Stop()
 
 	storeEndpoints := fmt.Sprintf("%s:%s", tstore.listenAddress, tstore.port)
-	storePath := filepath.Join(common.StoreBasePath, clusterName)
+	storePath := filepath.Join(common.StorePrefix, clusterName)
 
-	sm := store.NewStoreManager(tstore.store, storePath)
+	sm := store.NewKVBackedStore(tstore.store, storePath)
 
 	initialClusterSpec := &cluster.ClusterSpec{
 		InitMode:           cluster.ClusterInitModeP(cluster.ClusterInitModeNew),
@@ -144,7 +145,7 @@ func testInitNew(t *testing.T, merge bool) {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
-	cd, _, err := sm.GetClusterData()
+	cd, _, err := sm.GetClusterData(context.TODO())
 	// max_connection should be set by initdb
 	_, ok := cd.Cluster.Spec.PGParameters["max_connections"]
 	if merge && !ok {
@@ -180,9 +181,9 @@ func testInitExisting(t *testing.T, merge bool) {
 	defer tstore.Stop()
 
 	storeEndpoints := fmt.Sprintf("%s:%s", tstore.listenAddress, tstore.port)
-	storePath := filepath.Join(common.StoreBasePath, clusterName)
+	storePath := filepath.Join(common.StorePrefix, clusterName)
 
-	sm := store.NewStoreManager(tstore.store, storePath)
+	sm := store.NewKVBackedStore(tstore.store, storePath)
 
 	initialClusterSpec := &cluster.ClusterSpec{
 		InitMode:           cluster.ClusterInitModeP(cluster.ClusterInitModeNew),
@@ -283,7 +284,7 @@ func testInitExisting(t *testing.T, merge bool) {
 		t.Fatalf("expected archive_mode empty")
 	}
 
-	cd, _, err := sm.GetClusterData()
+	cd, _, err := sm.GetClusterData(context.TODO())
 	// max_connection should be set by initdb
 	v, ok = cd.Cluster.Spec.PGParameters["archive_mode"]
 	if merge && v != "on" {
@@ -326,9 +327,9 @@ func TestInitUsers(t *testing.T) {
 
 	// Test pg-repl-username == pg-su-username
 	clusterName = uuid.NewV4().String()
-	storePath := filepath.Join(common.StoreBasePath, clusterName)
+	storePath := filepath.Join(common.StorePrefix, clusterName)
 
-	sm := store.NewStoreManager(tstore.store, storePath)
+	sm := store.NewKVBackedStore(tstore.store, storePath)
 
 	initialClusterSpec := &cluster.ClusterSpec{
 		InitMode:           cluster.ClusterInitModeP(cluster.ClusterInitModeNew),
@@ -369,9 +370,9 @@ func TestInitUsers(t *testing.T) {
 
 	// Test pg-repl-username != pg-su-username and pg-su-password defined
 	clusterName = uuid.NewV4().String()
-	storePath = filepath.Join(common.StoreBasePath, clusterName)
+	storePath = filepath.Join(common.StorePrefix, clusterName)
 
-	sm = store.NewStoreManager(tstore.store, storePath)
+	sm = store.NewKVBackedStore(tstore.store, storePath)
 
 	ts2, err := NewTestSentinel(t, dir, clusterName, tstore.storeBackend, storeEndpoints, fmt.Sprintf("--initial-cluster-spec=%s", initialClusterSpecFile))
 	if err != nil {
@@ -417,9 +418,9 @@ func TestInitialClusterSpec(t *testing.T) {
 	clusterName := uuid.NewV4().String()
 
 	storeEndpoints := fmt.Sprintf("%s:%s", tstore.listenAddress, tstore.port)
-	storePath := filepath.Join(common.StoreBasePath, clusterName)
+	storePath := filepath.Join(common.StorePrefix, clusterName)
 
-	sm := store.NewStoreManager(tstore.store, storePath)
+	sm := store.NewKVBackedStore(tstore.store, storePath)
 
 	initialClusterSpec := &cluster.ClusterSpec{
 		InitMode:               cluster.ClusterInitModeP(cluster.ClusterInitModeNew),
@@ -447,7 +448,7 @@ func TestInitialClusterSpec(t *testing.T) {
 		t.Fatal("expected cluster in initializing phase")
 	}
 
-	cd, _, err := sm.GetClusterData()
+	cd, _, err := sm.GetClusterData(context.TODO())
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -510,4 +511,91 @@ func TestExclusiveLock(t *testing.T) {
 	if err := tk2.cmd.ExpectTimeout("cannot take exclusive lock on data dir", 60*time.Second); err != nil {
 		t.Fatalf("expecting keeper reporting that failed to take an exclusive lock on data dir")
 	}
+}
+
+func TestPasswordTrailingNewLine(t *testing.T) {
+	t.Parallel()
+
+	dir, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	tstore, err := NewTestStore(t, dir)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if err := tstore.Start(); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if err := tstore.WaitUp(10 * time.Second); err != nil {
+		t.Fatalf("error waiting on store up: %v", err)
+	}
+	storeEndpoints := fmt.Sprintf("%s:%s", tstore.listenAddress, tstore.port)
+	defer tstore.Stop()
+
+	clusterName := uuid.NewV4().String()
+
+	u := uuid.NewV4()
+	id := fmt.Sprintf("%x", u[:4])
+
+	pgSUPassword := "stolon_superuserpassword\n"
+	pgReplPassword := "stolon_replpassword\n"
+
+	tk, err := NewTestKeeperWithID(t, dir, id, clusterName, pgSUUsername, pgSUPassword, pgReplUsername, pgReplPassword, tstore.storeBackend, storeEndpoints)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if err := tk.StartExpect(); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	if err := tk.cmd.ExpectTimeout("superuser password contain trailing new line, removing", 30*time.Second); err != nil {
+		t.Fatalf(`expecting keeper reporting "superuser password contain trailing new line, removing"`)
+	}
+	if err := tk.cmd.ExpectTimeout("replication user password contain trailing new line, removing", 30*time.Second); err != nil {
+		t.Fatalf(`expecting keeper reporting "replication user password contain trailing new line, removing"`)
+	}
+	tk.Stop()
+
+	pgSUPassword = "stolon_superuserpassword\n"
+	pgReplPassword = "\n"
+
+	tk, err = NewTestKeeperWithID(t, dir, id, clusterName, pgSUUsername, pgSUPassword, pgReplUsername, pgReplPassword, tstore.storeBackend, storeEndpoints)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if err := tk.StartExpect(); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	if err := tk.cmd.ExpectTimeout("replication user password contain trailing new line, removing", 30*time.Second); err != nil {
+		t.Fatalf(`expecting keeper reporting "replication user password contain trailing new line, removing"`)
+	}
+	if err := tk.cmd.ExpectTimeout("replication user password is empty after removing trailing new line", 30*time.Second); err != nil {
+		t.Fatalf(`expecting keeper reporting "replication user password is empty after removing trailing new line"`)
+	}
+
+	tk.Stop()
+
+	pgSUPassword = "\n"
+	pgReplPassword = "stolon_replpassword\n"
+
+	tk, err = NewTestKeeperWithID(t, dir, id, clusterName, pgSUUsername, pgSUPassword, pgReplUsername, pgReplPassword, tstore.storeBackend, storeEndpoints)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if err := tk.StartExpect(); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	if err := tk.cmd.ExpectTimeout("superuser password contain trailing new line, removing", 30*time.Second); err != nil {
+		t.Fatalf(`expecting keeper reporting "superuser password contain trailing new line, removing"`)
+	}
+	if err := tk.cmd.ExpectTimeout("superuser password is empty after removing trailing new line", 30*time.Second); err != nil {
+		t.Fatalf(`expecting keeper reporting "superuser password is empty after removing trailing new line"`)
+	}
+
+	tk.Stop()
 }

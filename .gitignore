@@ -9,8 +9,8 @@
 *.un~
 Session.vim
 .netrwhist
+.idea/
 
 #
 bin/
-/gopath/
 /release/

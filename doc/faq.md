@@ -14,6 +14,8 @@ We are open to alternative solutions (PRs are welcome) like using haproxy if the
 
 Currently the proxy redirects all requests to the master. There is a [feature request](https://github.com/sorintlab/stolon/issues/132) for using the proxy also for standbys but it's low in the priority list.
 
+There is a simple Python script that gets info about standbys from `stolonctl` and generates HAProxy config: [UnitedTraders/stolon-standby-haproxy](https://github.com/UnitedTraders/stolon-standby-haproxy).
+
 If your application want to query the hot standbys, currently you can read the standby dbs and their status form the cluster data directly from the store (but be warned that this isn't meant to be stable).
 
 ## Why is shared storage and fencing not necessary with stolon?
@@ -48,7 +50,7 @@ The stolon pros are the same of the above question and it'll let you avoid the n
 
 ## What happens if etcd/consul is partitioned?
 
-See [Stolon Architecture and Requirements](doc/architecture.md)
+See [Stolon Architecture and Requirements](architecture.md)
 
 ## How are backups handled with stolon?
 
@@ -58,7 +60,15 @@ stolon let you easily integrate with any backup/restore solution. See the [point
 
 When using async replication the leader sentinel tries to find the best standby using a valid standby with the (last reported) nearest xlog location to the master latest knows xlog location. If a master is down there's no way to know its latest xlog position (stolon get and save it at some intervals) so there's no way to guarantee that the standby is not behind but just that the best standby of the ones available will be choosen.
 
-When using synchronous replication only synchronous standbys will be choosen so standbys behind the master won't be choosen (be aware of postgresql synchronous replication limits explaned in the [postgresql documentation](https://www.postgresql.org/docs/9.6/static/warm-standby.html#SYNCHRONOUS-REPLICATION), for example, when a master restarts while no synchronous standbys are available, the transactions waiting for acknowledgement on the master will be marked as fully committed. We are thinking of a way to avoid this using stolon).
+When using synchronous replication only synchronous standbys will be choosen so standbys behind the master won't be choosen (be aware of postgresql synchronous replication limits explaned in the [postgresql documentation](https://www.postgresql.org/docs/9.6/static/warm-standby.html#SYNCHRONOUS-REPLICATION), for example, when a master restarts while no synchronous standbys are available, the transactions waiting for acknowledgement on the master will be marked as fully committed. This is "fixed" by stolon. See the [synchronous replication doc](syncrepl.md).
+
+## Does stolon uses postgres sync replication [quorum methods](https://www.postgresql.org/docs/10/static/runtime-config-replication.html#RUNTIME-CONFIG-REPLICATION-MASTER) (FIRST or ANY)?
+
+A "quorum" like and also more powerful and extensible feature is already provided by stolon and managed by the sentinel using the `MinSynchronousStandbys` and `MaxSynchronousStandbys` cluster specification options (if you want to extend it please open an RFE issue or a pull request).
+
+We deliberately don't use postgres FIRST or ANY methods with N different than the number of the wanted synchronous standbys because we need that all the defined standbys are synchronous (so just only one failed standby will block the primary).
+
+This is needed for consistency. If we have 3 standbys and we use FIRST 2 (a, b, c), the sentinel, when the master fails, won't be able to know which of the 3 standbys is really synchronous and in sync with the master. And choosing the non synchronous one will cause the loss of the transactions contained in the wal records not transmitted.
 
 ## Does stolon use Consul as a DNS server as well?
 

@@ -1,27 +1,7 @@
 #!/usr/bin/env bash
 
 set -e
-
-# Cross compatibility with osx
-# origin source: https://github.com/kubernetes/kubernetes/blob/master/hack/lib/init.sh#L102
-function readlinkdashf() {
-	# run in a subshell for simpler 'cd'
-  (
-    if [[ -d "$1" ]]; then # This also catch symlinks to dirs.
-      cd "$1"
-      pwd -P
-    else
-      cd $(dirname "$1")
-      local f
-      f=$(basename "$1")
-      if [[ -L "$f" ]]; then
-        readlink "$f"
-      else
-        echo "$(pwd -P)/${f}"
-      fi
-    fi
-  )
-}
+source $(dirname $0)/scripts/readlinkdashf.sh
 
 BASEDIR=$(readlinkdashf $(dirname $0))
 BINDIR=${BASEDIR}/bin
@@ -33,15 +13,10 @@ fi
 ORG_PATH="github.com/sorintlab"
 REPO_PATH="${ORG_PATH}/stolon"
 
-export GOPATH=${PWD}/gopath
-
-rm -f $GOPATH/src/${REPO_PATH}
-mkdir -p $GOPATH/src/${ORG_PATH}
-ln -s ${PWD} $GOPATH/src/${REPO_PATH}
-
 mkdir -p ${BINDIR}
 
-export GO15VENDOREXPERIMENT=1
+VERSION=${STOLON_VERSION:-$(${BASEDIR}/scripts/git-version.sh)}
+LD_FLAGS="-s -X ${REPO_PATH}/cmd.Version=$VERSION"
 
 # for static compilation we need to compile with cgo disabled (CGO_ENABLED=0),
 # this will trigger a rebuild of all the packages and also the go std library
@@ -66,36 +41,16 @@ if [ -w ${go_root_dir}/pkg ]; then
 	use_go_install=1
 fi
 
-if [ -z $use_go_install ]; then
-	echo "Cannot find/create a go stdlib created with cgo disabled for the go release installed at ${go_root_dir} since ${go_root_dir}/pkg is not writable by `whoami`"
-	echo "The build will use \"go build\" instead of \"go install\". This is slower since every run will need to rebuild all the needed packages."
-	echo "To speed up the build you should make ${go_root_dir}/pkg writable for `whoami` for at least the first build"
-	echo "or manually rebuild stdlib executing the command 'CGO_ENABLED=0 go install -a -installsuffix cgo std' from a user with write access to ${go_root_dir}/pkg"
+for cmd in sentinel proxy; do
+	CGO_ENABLED=0 go build -installsuffix cgo -ldflags "$LD_FLAGS" -o ${BINDIR}/stolon-${cmd} ${REPO_PATH}/cmd/${cmd}
+done
+CGO_ENABLED=0 go build -installsuffix cgo -ldflags "$LD_FLAGS" -o ${BINDIR}/stolonctl ${REPO_PATH}/cmd/stolonctl
 
-	for cmd in sentinel proxy; do
-		CGO_ENABLED=0 go build -a -installsuffix cgo -ldflags '-s' -o ${BINDIR}/stolon-${cmd} ${REPO_PATH}/cmd/${cmd}
-	done
-	CGO_ENABLED=0 go build -a -installsuffix cgo -ldflags '-s' -o ${BINDIR}/stolonctl ${REPO_PATH}/cmd/stolonctl
-else
-	for cmd in sentinel proxy; do
-		CGO_ENABLED=0 go install -installsuffix cgo -ldflags '-s' ${REPO_PATH}/cmd/${cmd}
-		rm -f ${BINDIR}/stolon-${cmd}
-		cp ${GOPATH}/bin/${cmd} ${BINDIR}/stolon-${cmd}
-	done
-	CGO_ENABLED=0 go install -installsuffix cgo -ldflags '-s' ${REPO_PATH}/cmd/stolonctl
-	rm -f ${BINDIR}/stolonctl
-	cp ${GOPATH}/bin/stolonctl ${BINDIR}/
-fi
-
-# stolon-keeper cannot be statically built since it needs to get its current
-# running user and this is not available with cgo disabled
-go install ${REPO_PATH}/cmd/keeper
-rm -f ${BINDIR}/stolon-keeper
-cp ${GOPATH}/bin/keeper ${BINDIR}/stolon-keeper
+go build -ldflags "$LD_FLAGS" -o ${BINDIR}/stolon-keeper ${REPO_PATH}/cmd/keeper 
 
 # Copy binaries to Dockerfile image directories
 declare -a DOCKERFILE_PATHS
-DOCKERFILE_PATHS=(${BASEDIR}/examples/kubernetes/image/docker ${BASEDIR}/examples/docker)
+DOCKERFILE_PATHS=(${BASEDIR}/examples/kubernetes/image/docker)
 for path in "${DOCKERFILE_PATHS[@]}"
 do
   rm -rf $path/bin/

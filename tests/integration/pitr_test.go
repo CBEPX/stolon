@@ -15,6 +15,7 @@
 package integration
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -24,14 +25,24 @@ import (
 	"time"
 
 	"github.com/satori/go.uuid"
-	"github.com/sorintlab/stolon/common"
-	"github.com/sorintlab/stolon/pkg/cluster"
-	"github.com/sorintlab/stolon/pkg/store"
+	"github.com/sorintlab/stolon/internal/cluster"
+	"github.com/sorintlab/stolon/internal/common"
+	"github.com/sorintlab/stolon/internal/store"
 )
 
 func TestPITR(t *testing.T) {
 	t.Parallel()
 
+	testPITR(t, false)
+}
+
+func TestPITRRecoveryTarget(t *testing.T) {
+	t.Parallel()
+
+	testPITR(t, true)
+}
+
+func testPITR(t *testing.T, recoveryTarget bool) {
 	dir, err := ioutil.TempDir("", "stolon")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -54,9 +65,9 @@ func TestPITR(t *testing.T) {
 
 	clusterName := uuid.NewV4().String()
 
-	storePath := filepath.Join(common.StoreBasePath, clusterName)
+	storePath := filepath.Join(common.StorePrefix, clusterName)
 
-	sm := store.NewStoreManager(tstore.store, storePath)
+	sm := store.NewKVBackedStore(tstore.store, storePath)
 
 	initialClusterSpec := &cluster.ClusterSpec{
 		InitMode:           cluster.ClusterInitModeP(cluster.ClusterInitModeNew),
@@ -108,6 +119,9 @@ func TestPITR(t *testing.T) {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
+	// save current time used to define recovery_target_time
+	now := time.Now()
+
 	// ioutil.Tempfile already creates files with 0600 permissions
 	pgpass, err := ioutil.TempFile("", "pgpass")
 	if err != nil {
@@ -130,11 +144,11 @@ func TestPITR(t *testing.T) {
 	ts.Stop()
 
 	// Delete the current cluster data
-	if err := tstore.store.Delete(filepath.Join(storePath, "clusterdata")); err != nil {
+	if err := tstore.store.Delete(context.TODO(), filepath.Join(storePath, "clusterdata")); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 	// Delete sentinel leader key to just speedup new election
-	if err := tstore.store.Delete(filepath.Join(storePath, common.SentinelLeaderKey)); err != nil {
+	if err := tstore.store.Delete(context.TODO(), filepath.Join(storePath, common.SentinelLeaderKey)); err != nil && err != store.ErrKeyNotFound {
 		t.Fatalf("unexpected err: %v", err)
 	}
 
@@ -154,6 +168,13 @@ func TestPITR(t *testing.T) {
 			"max_prepared_transactions": "100",
 		}),
 	}
+
+	if recoveryTarget {
+		initialClusterSpec.PITRConfig.RecoveryTargetSettings = &cluster.RecoveryTargetSettings{
+			RecoveryTargetTime: now.Format(time.RFC3339),
+		}
+	}
+
 	initialClusterSpecFile, err = writeClusterSpec(dir, initialClusterSpec)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)

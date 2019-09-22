@@ -16,7 +16,7 @@ Stolon is composed of 3 main components
 
 Every keeper MUST have a different UID that can be manually provided (`--uid` option) or will be generated. After the first start the keeper id (provided or generated) is saved inside the keeper data directory.
 
-Every keeper MUST have a persistent data directory (no ephemeral volumes like k8s `emptyDir`) or you'll lose your data if all the keepers are stoppped at the same time (since at restart no valid standby to failover will be available).
+Every keeper MUST have a persistent data directory (no ephemeral volumes like k8s `emptyDir`) or you'll lose your data if all the keepers are stopped at the same time (since at restart no valid standby to failover will be available).
 
 If you're providing the keeper's uid in the command line don't start a new keeper with the same id if you're providing a different data directory (empty or populated) since you're changing data out of the stolon control causing possible data loss or strange behaviors.
 
@@ -27,19 +27,47 @@ Sentinels and proxies don't need a local data directory but only use the store (
 
 #### Store
 
-Currently the store can be etcd or consul, we leverage their features to achieve consistent and persistent cluster data.
+Currently the store can be etcd (using v2 or v3 api), consul or kubernetes, we leverage their features to achieve consistent and persistent cluster data.
 
 The store should be high available (at least three nodes).
 
+When a stolon component is not able to read (quorum consistent read) or write to a quorate partition of the store (the stolon component is partitioned, the store is partitioned, the store is down etc...) it will just retry talking with it.
+
+In addition, the stolon-proxy, to avoid sending client connections to a partioned master, will drop all the connections since it cannot know if the cluster data has changed (for example if the proxy has problems reading from the store but the sentinel can write to it).
+
+### etcd and consul store backends
+
 If etcd or consul becomes partitioned (network partition or store nodes dead/with problems), thanks to the raft protocol, only the quorate partition can accept writes.
 
-When this happens the stolon components not able to read or write to a quorate partition (stolon uses quorum reads) will just retry talking with it.
+Every stolon executable has a `--store-prefix` option (defaulting to `stolon/cluster`) to set the store path prefix. For etcdv3 and consul, if not provided, a starting `/` will be automatically added since they have a directory based layout. Instead, for etcdv3, the prefix will be kept as provided (etcdv3 has a flat namespace and for this reason two prefixes with and without a starting `/` are different and both valid).
 
-In addition, the stolon-proxy, if not able to talk with the store, to avoid sending client connections to a paritioned master, will drop all the connections since it cannot know if the cluster data has changed (for example if the proxy has problems reading from the store but the sentinel can write to it).
+#### etcdv3 compaction
+
+When using etcdv3 you must periodically compact the keyspace to avoid storage space exhaustion. Stolon doesn't need historical key values but won't compact the etcdv3 store since this operation is global and the etcd cluster could be shared with other products that requires historical values. Compaction could be triggered in multiple ways. If possible we suggest to just enable automatic compaction (see etcd options). Please refer to the [official etcd doc](https://coreos.com/etcd/docs/latest/op-guide/maintenance.html).
+
+### kubernetes store backend
+
+The kubernetes store relies on the kubernetes api server and uses kubernetes resources to save the clusterdata, components discovery and status report.
+
+The k8s API server must be configured with enabled etcd quorum read (should be the default in standard kubernetes installations since the option to remove it is deprecated).
+
+**NOTE**: a kubernetes based store will share the kubernetes API server with all the other k8s cluster resources. If the API servers are overloaded and doesn't answer in time, as explained above, the proxies will, after a timeout, close connections to the master keeper. The same will happen if you're updating you kubernetes cluster and you have the need to shutdown all your API servers. A dedicated store, like an etcd cluster, will probably be more reliable and avoid the proxies closing connection and impacting you application availability.
+
+To store the clusterdata and handle sentinel leader election a configmap resource named `stolon-cluster-$CLUSTERNAME` is created/updated. Pay attention to don't delete this configmap or you'll lose you cluster data. The clusterdata is saved inside a metadata field called `stolon-clusterdata`. No data provided by the configmap is used and user should pay attention to not manually modify the configmap.
+
+To discovery stolon components (keepers, proxies, sentinels) a lookup with specific label selectors is executed. These labels must be correctly set on the pod definition (see the [kubernetes example](/examples/kubernetes)). They are:
+
+`component` set to the component type: `stolon-keeper`, `stolon-sentinel`, `stolon-proxy`
+`stolon-cluster` set to the stolon cluster name
+
+Every components also saves its state in an annotation of their own pod called `stolon-status`
+
+`stolonctl` may be executed inside a pod running a stolon component or also externally. It'll behave like `kubectl` when choosing how to access the k8s API servers:
+When run inside a pod it'll use the pod service account to connect to the k8s API servers. When run externally it'll honor the `$KUBECONFIG` environment variable, use the default `~/.kube/config` file or you can override the `kube-config` file path, the context and the namespace to use with the `stolonctl` options `--kubeconfig`, `--kube-context` and `--kube-namespace`.
 
 
 ##### Handling permanent loss of the store.
-ed up
+
 If you have permanently lost your store you can create a new one BUT don't restore its contents (at least the stolon ones) from a backup since the backed up data could be older than the current real state and this could cause different problems. For example if you restore a stolon cluster data where the elected master was different than the current one, you can end up with this old master becoming the new master.
 
 The cleaner way is to reinitialize the stolon cluster using the `existing` `initMode` (see [Cluster Initialization](initialization.md)).
@@ -60,9 +88,11 @@ The replication user is used for:
 * managing/querying the keepers' controlled instances
 * replication between postgres instances
 
-Currently only md5 password based authentication is supported. In future different authentication mechanism will be added.
+Currently trust (password-less) and md5 password based authentication are supported. In the future, different authentication mechanisms will be added.
 
 To avoid security problems (user credentials cannot be globally defined in the cluster specification since if not correctly secured it could be read by anyone accessing the cluster store) these users and their related passwords must be provided as options to the stolon keepers and their values MUST be the same for all the keepers (or different things will break). These options are `--pg-su-username`, `--pg-su-password/--pg-su-passwordfile`, `--pg-repl-username` and `--pg-repl-password/--pg-repl-passwordfile`
+
+Utilizing `--pg-su-auth-method/--pg-repl-auth-method` trust is not recommended in production environments, but they may be used in place of password authentication. If the same user is utilized as superuser and replication user, the passwords and auth methods must match.
 
 When a keeper initializes a new pg db cluster, the provided superuser and replication user will be created.
 

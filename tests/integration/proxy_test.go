@@ -15,6 +15,7 @@
 package integration
 
 import (
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -23,9 +24,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sorintlab/stolon/common"
-	"github.com/sorintlab/stolon/pkg/cluster"
-	"github.com/sorintlab/stolon/pkg/store"
+	"github.com/sorintlab/stolon/internal/cluster"
+	"github.com/sorintlab/stolon/internal/common"
+	"github.com/sorintlab/stolon/internal/store"
 
 	"github.com/satori/go.uuid"
 )
@@ -47,7 +48,7 @@ func TestProxyListening(t *testing.T) {
 	}
 	storeEndpoints := fmt.Sprintf("%s:%s", tstore.listenAddress, tstore.port)
 
-	tp, err := NewTestProxy(t, dir, clusterName, pgSUUsername, pgSUPassword, tstore.storeBackend, storeEndpoints)
+	tp, err := NewTestProxy(t, dir, clusterName, pgSUUsername, pgSUPassword, pgReplUsername, pgReplPassword, tstore.storeBackend, storeEndpoints)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -76,9 +77,9 @@ func TestProxyListening(t *testing.T) {
 		}
 	}()
 
-	storePath := filepath.Join(common.StoreBasePath, clusterName)
+	storePath := filepath.Join(common.StorePrefix, clusterName)
 
-	sm := store.NewStoreManager(tstore.store, storePath)
+	sm := store.NewKVBackedStore(tstore.store, storePath)
 
 	cd := &cluster.ClusterData{
 		FormatVersion: cluster.CurrentCDFormatVersion,
@@ -126,7 +127,7 @@ func TestProxyListening(t *testing.T) {
 			},
 		},
 	}
-	pair, err := sm.AtomicPutClusterData(cd, nil)
+	pair, err := sm.AtomicPutClusterData(context.TODO(), cd, nil)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -187,7 +188,7 @@ func TestProxyListening(t *testing.T) {
 		t.Fatalf("expecting tp listening, but it's not listening.")
 	}
 	// wait proxy reading again from the store
-	time.Sleep(cluster.DefaultProxyCheckInterval)
+	time.Sleep(2 * cluster.DefaultProxyCheckInterval)
 	// tp should listen
 	if ok := tp.CheckListening(); !ok {
 		t.Fatalf("expecting tp listening, but it's not listening.")
@@ -196,7 +197,7 @@ func TestProxyListening(t *testing.T) {
 	t.Logf("test proxyConf removed. Should continue listening")
 	// remove proxyConf
 	cd.Proxy.Spec.MasterDBUID = ""
-	pair, err = sm.AtomicPutClusterData(cd, pair)
+	pair, err = sm.AtomicPutClusterData(context.TODO(), cd, pair)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -209,7 +210,7 @@ func TestProxyListening(t *testing.T) {
 	t.Logf("test proxyConf restored. Should continue listening")
 	// Set proxyConf again
 	cd.Proxy.Spec.MasterDBUID = "01"
-	pair, err = sm.AtomicPutClusterData(cd, pair)
+	pair, err = sm.AtomicPutClusterData(context.TODO(), cd, pair)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -221,7 +222,7 @@ func TestProxyListening(t *testing.T) {
 
 	t.Logf("test clusterView removed. Should continue listening")
 	// remove whole clusterview
-	_, err = sm.AtomicPutClusterData(nil, pair)
+	_, err = sm.AtomicPutClusterData(context.TODO(), nil, pair)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
